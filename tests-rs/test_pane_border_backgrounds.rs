@@ -30,7 +30,7 @@ fn leaf(id: usize, active: bool) -> LayoutJson {
         copy_cursor_col: None,
         content: Vec::new(),
         rows_v2: Vec::new(),
-        title: None, copy_hl: Vec::new(),
+        title: None, border_label: None, copy_hl: Vec::new(),
     }
 }
 
@@ -144,6 +144,94 @@ fn two_pane_separator_and_labels_preserve_active_and_inactive_backgrounds() {
     assert_eq!(active_label.style().bg, Some(Color::Red));
     assert_eq!(inactive_label.style().bg, Some(Color::Blue));
     assert!(!active_label.style().add_modifier.contains(Modifier::BOLD));
+}
+
+fn labelled_leaf(id: usize, active: bool, label: &str) -> LayoutJson {
+    let mut node = leaf(id, active);
+    if let LayoutJson::Leaf { border_label, .. } = &mut node {
+        *border_label = Some(label.to_string());
+    }
+    node
+}
+
+fn render_labels(layout: &LayoutJson, format: &str, active_style: Style, inactive_style: Style) -> ratatui::buffer::Buffer {
+    let backend = TestBackend::new(40, 6);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| {
+            let area = Rect::new(0, 0, 40, 6);
+            let active_rect = compute_active_rect_json(layout, area);
+            render_layout_json(
+                frame,
+                layout,
+                area,
+                false,
+                inactive_style,
+                active_style,
+                false,
+                Color::Reset,
+                active_rect,
+                "",
+                false,
+                "top",
+                format,
+                layout.count_leaves(),
+                crate::border_lines::border_chars("single"),
+                None,
+                WindowContentStyles::default(),
+                PaneBorderIndicators::Colour,
+            );
+        })
+        .unwrap();
+    terminal.backend().buffer().clone()
+}
+
+fn row_text(buffer: &ratatui::buffer::Buffer, y: u16, from: u16, to: u16) -> String {
+    (from..to).map(|x| buffer[(x, y)].symbol()).collect()
+}
+
+// The server expands pane-border-format per pane; the client must draw that
+// text and its `#[...]` styles instead of the raw format (which it cannot
+// expand: conditionals and pane variables live in the server's state).
+#[test]
+fn server_expanded_border_label_renders_text_and_inline_styles() {
+    let format = "#[fg=#{?pane_active,red,blue},bold] #{?pane_active,ACTIVE ,}#P #[default] #{pane_current_command}";
+    let layout = LayoutJson::Split {
+        kind: "Horizontal".to_string(),
+        sizes: vec![50, 50],
+        children: vec![
+            labelled_leaf(0, true, "#[fg=red,bold] ACTIVE 0 #[default] zsh"),
+            labelled_leaf(1, false, "#[fg=blue,bold] 1 #[default] nvim"),
+        ],
+    };
+    let active_style = Style::default().fg(Color::Green);
+    let inactive_style = Style::default().fg(Color::DarkGray);
+    let buffer = render_labels(&layout, format, active_style, inactive_style);
+
+    assert_eq!(row_text(&buffer, 0, 0, 14), " ACTIVE 0  zsh");
+    assert!(!row_text(&buffer, 0, 0, 40).contains("#{"), "raw format leaked into the label");
+    assert!(!row_text(&buffer, 0, 0, 40).contains("#["), "style directive leaked into the label");
+
+    let styled = buffer[(1, 0)].style();
+    assert_eq!(styled.fg, Some(Color::Red));
+    assert!(styled.add_modifier.contains(Modifier::BOLD));
+    // `#[default]` returns to the pane's border style.
+    let plain = buffer[(11, 0)].style();
+    assert_eq!(plain.fg, Some(Color::Green));
+    assert!(!plain.add_modifier.contains(Modifier::BOLD));
+
+    let inactive_x = (0..40)
+        .find(|&x| buffer[(x, 0)].symbol() == "n")
+        .expect("inactive pane label");
+    assert_eq!(buffer[(inactive_x, 0)].style().fg, Some(Color::DarkGray));
+}
+
+// A server without `border_label` still gets the client-side substitution.
+#[test]
+fn missing_border_label_falls_back_to_index_substitution() {
+    let layout = leaf(7, true);
+    let buffer = render_labels(&layout, "pane #P", Style::default(), Style::default());
+    assert_eq!(row_text(&buffer, 0, 0, 6), "pane 7");
 }
 
 #[test]

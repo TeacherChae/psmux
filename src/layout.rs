@@ -245,6 +245,12 @@ pub enum LayoutJson {
         /// Pane title for border label expansion
         #[serde(default)]
         title: Option<String>,
+        /// `pane-border-format` expanded for this pane by the server's format
+        /// engine, so the label can use conditionals, pane variables and
+        /// `#[...]` styles. None when no label row is shown; the client then
+        /// falls back to substituting the title and index itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        border_label: Option<String>,
         /// Copy mode search match and mark highlights of the focused pane, as
         /// `[row, first col, last col, kind]` (`copy_mode::copy_highlights`).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -374,6 +380,32 @@ fn sync_copy_freeze(app: &mut AppState, in_copy_mode: bool) {
     if let Some(v) = new_offset { app.copy_scroll_offset = v; }
 }
 
+/// `pane-border-format` expanded by the format engine for every tiled pane of
+/// window `win_idx`, keyed by pane id. tmux expands this format per pane
+/// (screen-redraw.c), so labels may use conditionals such as
+/// `#{?pane_active,...}`, any pane variable, and `#[...]` styles; the client
+/// only parses the styles. Empty when `pane-border-status` hides the label row.
+fn border_labels(app: &AppState, win_idx: usize) -> Vec<(usize, String)> {
+    let status = app.user_options.get("pane-border-status").map(String::as_str).unwrap_or("off");
+    if status == "off" {
+        return Vec::new();
+    }
+    let fmt = app.user_options.get("pane-border-format").map(String::as_str)
+        .unwrap_or(crate::client::DEFAULT_PANE_BORDER_FORMAT);
+    if fmt.is_empty() {
+        return Vec::new();
+    }
+    let Some(win) = app.windows.get(win_idx) else { return Vec::new() };
+    crate::tree::collect_pane_ids(&win.root)
+        .into_iter()
+        .map(|id| (id, crate::format::expand_format_for_pane_by_id(fmt, app, id)))
+        .collect()
+}
+
+fn label_for(labels: &[(usize, String)], pane_id: usize) -> Option<&str> {
+    labels.iter().find(|(id, _)| *id == pane_id).map(|(_, label)| label.as_str())
+}
+
 fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::Result<LayoutJson> {
     let in_copy_mode = app.mode.in_copy();
     if win_id_override.is_none() {
@@ -431,7 +463,7 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
                             sel_end_row: None, sel_end_col: None,
                             sel_mode: None,
                             copy_cursor_row: None, copy_cursor_col: None,
-                            content: vec![], rows_v2: vec![], title: None, copy_hl: Vec::new(),
+                            content: vec![], rows_v2: vec![], title: None, border_label: None, copy_hl: Vec::new(),
                         };
                     } else {
                         // Safety timeout expired without sentinel; unsquelch anyway.
@@ -453,7 +485,7 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
                         sel_end_row: None, sel_end_col: None,
                         sel_mode: None,
                         copy_cursor_row: None, copy_cursor_col: None,
-                        content: vec![], rows_v2: vec![], title: None, copy_hl: Vec::new(),
+                        content: vec![], rows_v2: vec![], title: None, border_label: None, copy_hl: Vec::new(),
                     };
                 };
                 let screen = parser.screen();
@@ -647,6 +679,7 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
                     content: lines,
                     rows_v2,
                     title: if p.title.is_empty() { None } else { Some(p.title.clone()) },
+                    border_label: None,
                     copy_hl: Vec::new(),
                 }
             }
@@ -784,6 +817,20 @@ fn dump_layout_inner(app: &mut AppState, win_id_override: Option<usize>) -> io::
             set_hl(&mut root, &path, hl);
         }
     }
+    let labels = border_labels(app, win_idx);
+    if !labels.is_empty() {
+        fn set_labels(node: &mut LayoutJson, labels: &[(usize, String)]) {
+            match node {
+                LayoutJson::Leaf { id, border_label, .. } => {
+                    *border_label = label_for(labels, *id).map(str::to_string);
+                }
+                LayoutJson::Split { children, .. } => {
+                    for child in children { set_labels(child, labels); }
+                }
+            }
+        }
+        set_labels(&mut root, &labels);
+    }
     Ok(root)
 }
 
@@ -884,8 +931,17 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
         sel_mode: crate::types::SelectionMode,
         emacs: bool,
         hl: &[[u16; 4]],
+        labels: &[(usize, String)],
         out: &mut String,
     ) {
+        /// Append `,"border_label":"..."` when the pane has an expanded label.
+        fn push_border_label(labels: &[(usize, String)], pane_id: usize, out: &mut String) {
+            if let Some(label) = label_for(labels, pane_id) {
+                out.push_str(",\"border_label\":\"");
+                json_esc(label, out);
+                out.push('"');
+            }
+        }
         match node {
             Node::Split { kind, sizes, children } => {
                 out.push_str("{\"type\":\"split\",\"kind\":\"");
@@ -902,7 +958,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                 for (i, c) in children.iter_mut().enumerate() {
                     if i > 0 { out.push(','); }
                     cur_path.push(i);
-                    write_node(c, cur_path, active_path, in_copy, scroll_off, anchor, anchor_scroll, cpos, pos_scroll, sel_mode, emacs, hl, out);
+                    write_node(c, cur_path, active_path, in_copy, scroll_off, anchor, anchor_scroll, cpos, pos_scroll, sel_mode, emacs, hl, labels, out);
                     cur_path.pop();
                 }
                 out.push_str("]}");
@@ -939,9 +995,13 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                                 "\"active\":{},\"copy_mode\":false,",
                                 "\"scroll_offset\":0,",
                                 "\"view_offset\":0,",
-                                "\"rows_v2\":[],\"content\":[],\"title\":null}}"),
+                                "\"rows_v2\":[],\"content\":[],\"title\":null"),
                             p.id, p.last_rows, p.last_cols, is_active,
                         ));
+                        // A blank frame still carries its label, so the border
+                        // never flashes the raw format while the pane is hidden.
+                        push_border_label(labels, p.id, out);
+                        out.push('}');
                         return;
                     } else {
                         p.squelch_until = None;
@@ -1288,6 +1348,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                     json_esc(&p.title, out);
                     out.push('"');
                 }
+                push_border_label(labels, p.id, out);
                 // Search match and mark highlights, only on the focused copy
                 // mode pane and only when there are any (#694).
                 if is_active && in_copy && !hl.is_empty() {
@@ -1303,13 +1364,14 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
         }
     }
 
+    let labels = border_labels(app, app.active_idx);
     let win = &mut app.windows[app.active_idx];
     let active_path = win.active_path.clone();
     let mut path = Vec::new();
     let mut out = String::with_capacity(32768);
     write_node(
         &mut win.root, &mut path, &active_path,
-        in_copy, scroll_off, anchor, anchor_scroll, cpos, pos_scroll, sel_mode, emacs, &hl, &mut out,
+        in_copy, scroll_off, anchor, anchor_scroll, cpos, pos_scroll, sel_mode, emacs, &hl, &labels, &mut out,
     );
     Ok(out)
 }
@@ -1748,3 +1810,7 @@ mod test_issue361_fastdump_hyperlink;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue685_pane_palette.rs"]
 mod test_issue685_pane_palette;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_pane_border_label_expansion.rs"]
+mod test_pane_border_label_expansion;

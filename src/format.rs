@@ -334,11 +334,19 @@ pub fn expand_format_for_window(fmt: &str, app: &AppState, win_idx: usize) -> St
                     }
                     i += 2; continue;
                 }
-                b'P' => {
-                    if let Some(w) = app.windows.get(shorthand_idx) {
-                        let active_id = get_active_pane_id(&w.root, &w.active_path).unwrap_or(0);
-                        let pos = crate::tree::get_pane_position_in_window(&w.root, active_id).unwrap_or(0);
-                        result.push_str(&(pos + app.pane_base_index_of(shorthand_idx)).to_string());
+                // tmux: #P and #D are pane_index and pane_id of the format's
+                // target pane, so list-panes -F and per-pane border labels
+                // see each pane rather than the window's active one.
+                b'P' | b'D' => {
+                    if app.windows.get(shorthand_idx).is_some() {
+                        let var = if bytes[i + 1] == b'P' { "pane_index" } else { "pane_id" };
+                        let value = expand_expression(var, app, win_idx);
+                        if has_strftime {
+                            // Escape the '%' so chrono doesn't misinterpret %0, %1, etc.
+                            result.push_str(&escape_strftime_percent(&value));
+                        } else {
+                            result.push_str(&value);
+                        }
                     }
                     i += 2; continue;
                 }
@@ -353,19 +361,6 @@ pub fn expand_format_for_window(fmt: &str, app: &AppState, win_idx: usize) -> St
                         result.push_str(&escape_strftime_percent(&hostname_cached()));
                     } else {
                         result.push_str(&hostname_cached());
-                    }
-                    i += 2; continue;
-                }
-                b'D' => {
-                    // tmux: #D = unique pane id (like %0, %1)
-                    if let Some(w) = app.windows.get(shorthand_idx) {
-                        let active_id = get_active_pane_id(&w.root, &w.active_path).unwrap_or(0);
-                        if has_strftime {
-                            // Escape the '%' so chrono doesn't misinterpret %0, %1, etc.
-                            result.push_str(&format!("%%{}", active_id));
-                        } else {
-                            result.push_str(&format!("%{}", active_id));
-                        }
                     }
                     i += 2; continue;
                 }

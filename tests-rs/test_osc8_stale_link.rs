@@ -135,7 +135,7 @@ fn pane_sized(content: &[u8], columns: u16) -> LayoutJson {
         copy_cursor_col: None,
         content: Vec::new(),
         rows_v2: crate::layout::serialize_screen_rows(parser.screen(), ROWS, columns),
-        title: None,
+        title: None, border_label: None,
         copy_hl: Vec::new(),
     }
 }

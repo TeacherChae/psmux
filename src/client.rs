@@ -2386,6 +2386,7 @@ pub fn render_layout_json(
             content,
             rows_v2,
             title,
+            border_label,
             copy_hl,
         } => {
             let window_style = window_styles.for_pane(*active);
@@ -2703,17 +2704,22 @@ pub fn render_layout_json(
             }
 
             if has_border_label {
-                let pane_title_str = title.as_deref().unwrap_or("");
-                let pane_label = border_format
-                    .replace("#{pane_title}", pane_title_str)
-                    .replace("#{pane_index}", &id.to_string())
-                    .replace("#P", &id.to_string());
-                let label_width = vt100::str_width(pane_label.as_str()) as u16;
+                // The server expands the format per pane; a server without
+                // `border_label` gets the old title/index substitution.
+                let pane_label = match border_label {
+                    Some(label) => label.clone(),
+                    None => border_format
+                        .replace("#{pane_title}", title.as_deref().unwrap_or(""))
+                        .replace("#{pane_index}", &id.to_string())
+                        .replace("#P", &id.to_string()),
+                };
+                let label_style = if *active { active_border_style } else { border_style };
+                let spans = crate::style::parse_inline_styles(&pane_label, label_style);
+                let label_width: u16 = spans.iter().map(|s| vt100::str_width(&s.content) as u16).sum();
                 if label_width > 0 && area.width >= label_width {
                     let label_y = if border_status == "bottom" { area.y + area.height.saturating_sub(1) } else { area.y };
                     let label_area = Rect::new(area.x, label_y, label_width.min(area.width), 1);
-                    let label_style = if *active { active_border_style } else { border_style };
-                    f.render_widget(Paragraph::new(Line::from(Span::styled(pane_label, label_style))), label_area);
+                    f.render_widget(Paragraph::new(Line::from(spans)), label_area);
                 }
             }
         }
