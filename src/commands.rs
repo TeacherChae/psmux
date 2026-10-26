@@ -9,7 +9,7 @@ use crate::tree::{compute_rects, kill_all_children, get_active_pane_id};
 use crate::pane::{create_window, split_active, kill_active_pane};
 use crate::copy_mode::{enter_copy_mode, switch_with_copy_save, paste_latest,
     capture_active_pane, save_latest_buffer};
-use crate::session::{send_control_to_port, list_all_sessions_tree};
+use crate::session::list_all_sessions_tree;
 use crate::window_ops::{toggle_zoom, unzoom_if_zoomed};
 
 /// Parse a popup dimension spec: "80" (absolute) or "95%" (percentage of term_dim).
@@ -2356,15 +2356,60 @@ pub(crate) fn run_delete_buffer(app: &mut AppState, name: Option<&str>) -> Resul
     }
 }
 
+thread_local! {
+    /// While [`execute_command_string`] runs a `;` list with a server to
+    /// forward to: the commands of the list that go to the server, in order.
+    static CHAIN_FORWARDED: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The commands below forward to the server through this. Inside a `;` list
+/// the command is held back and sent with the rest of the list instead.
+fn send_control_to_port(port: u16, msg: &str, session_key: &str) -> io::Result<()> {
+    let held = CHAIN_FORWARDED.with(|c| match c.borrow_mut().as_mut() {
+        Some(queued) => { queued.push(msg.trim_end_matches('\n').to_string()); true }
+        None => false,
+    });
+    if held { return Ok(()); }
+    crate::session::send_control_to_port(port, msg, session_key)
+}
+
 /// Execute a command string (used by menus, hooks, confirm dialogs, etc.)
 pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
     // Split on \; or ; to support command chaining (issue #192)
     let sub_commands = crate::config::split_chained_commands_pub(cmd);
     if sub_commands.len() > 1 {
+        let nested = CHAIN_FORWARDED.with(|c| c.borrow().is_some());
+        let Some(port) = app.control_port.filter(|_| !nested) else {
+            for sub in &sub_commands {
+                execute_command_string_single(app, sub)?;
+            }
+            return Ok(());
+        };
+        // tmux runs a list in order, each command finished before the next
+        // (cmd-queue.c). A forwarded command only runs once the server reads
+        // it, after this list returns, so `new-window ; split-window -h ;
+        // select-pane -L ; split-window -v` selected before the splits
+        // existed and split the right pane. From the first forwarded command
+        // on, the rest of the list goes to the server with it, in one message
+        // the server runs in order.
+        CHAIN_FORWARDED.with(|c| *c.borrow_mut() = Some(Vec::new()));
+        let mut result = Ok(());
         for sub in &sub_commands {
-            execute_command_string_single(app, sub)?;
+            let forwarding = CHAIN_FORWARDED.with(|c| c.borrow().as_ref().is_some_and(|q| !q.is_empty()));
+            if forwarding {
+                CHAIN_FORWARDED.with(|c| c.borrow_mut().as_mut().map(|q| q.push(sub.clone())));
+                continue;
+            }
+            if let Err(e) = execute_command_string_single(app, sub) {
+                result = Err(e);
+                break;
+            }
         }
-        return Ok(());
+        let queued = CHAIN_FORWARDED.with(|c| c.borrow_mut().take()).unwrap_or_default();
+        if !queued.is_empty() {
+            let _ = crate::session::send_control_to_port(port, &format!("{}\n", queued.join(" \\; ")), &app.session_key);
+        }
+        return result;
     }
     execute_command_string_single(app, cmd)
 }
@@ -4417,6 +4462,10 @@ mod tests_issue470_menu_popup;
 #[cfg(test)]
 #[path = "../tests-rs/test_menu_format_expansion.rs"]
 mod tests_menu_format_expansion;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_chain_forward_order.rs"]
+mod tests_chain_forward_order;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_killwindow_bad_target.rs"]
