@@ -3352,6 +3352,10 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
     // default (root) table. The prefix key always wins and forces the prefix
     // table, exactly as in `server_client_handle_key`'s `table_changed` block.
     let mut key_table_latch: Option<String> = None;
+    // While a repeatable (-r) binding of a latched table repeats: when the
+    // repeat window closes. tmux keeps the client on the table for
+    // repeat-time after such a binding (server-client.c CLIENT_REPEAT).
+    let mut latch_repeat_until: Option<Instant> = None;
     // Tables the server set without the client (CLI, command prompt,
     // run-shell, hooks) arrive in the state frame and are adopted here.
     let mut key_table_sync = KeyTableSync::default();
@@ -5200,6 +5204,29 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                             cmd_batch.push("prefix-end\n".into());
                         }
 
+                        // A repeating latched table only takes another key
+                        // that is repeatable there, inside the window. Any
+                        // other key ends the repeat and is looked up again
+                        // from the default table, as tmux's "currently
+                        // repeating but a non-repeating binding was found"
+                        // does, so typing right after a resize reaches the
+                        // pane instead of running a binding.
+                        if let Some(until) = latch_repeat_until {
+                            let key_tuple = normalize_key_for_binding((key.code, key.modifiers));
+                            let repeats = Instant::now() < until
+                                && key_table_latch.as_deref().is_some_and(|t| synced_bindings.iter().any(|b| {
+                                    b.t == t && b.r && parse_key_string(&b.k).is_some_and(|k| normalize_key_for_binding(k) == key_tuple)
+                                }));
+                            if !repeats {
+                                latch_repeat_until = None;
+                                if key_table_latch.take().is_some() {
+                                    cmd_batch.push(format!("switch-client -T {}\n",
+                                        crate::util::quote_arg_if_needed(key_table_sync.default_table())));
+                                    key_table_sync.note_own_write(None);
+                                }
+                            }
+                        }
+
                         // Overlay Esc must be checked BEFORE selection-Esc so that
                         // pressing Esc always closes the active overlay first.
                         // ── Server-side overlay key handling ─────────────────
@@ -5926,16 +5953,27 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
                                 KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right
                             );
                             let is_user_repeat = user_binding.map_or(false, |e| e.r);
-                            if latched_table.is_some() {
+                            if let Some(table) = latched_table.clone() {
                                 // The key came from a `switch-client -T` table,
                                 // not from the prefix table: the prefix is not
-                                // armed, so there is nothing to disarm and no
-                                // repeat window to open. The drop back to the
-                                // default table already happened above, before
-                                // the binding ran, so a `switch-client -T` in
-                                // the binding has re-armed the latch by now and
-                                // must not be undone here.
+                                // armed, so there is nothing to disarm. The drop
+                                // back to the default table already happened
+                                // above, before the binding ran, so a
+                                // `switch-client -T` in the binding has re-armed
+                                // the latch by now and must not be undone here.
                                 prefix_repeating = false;
+                                latch_repeat_until = None;
+                                // A repeatable binding keeps the client on the
+                                // table for repeat-time (tmux CLIENT_REPEAT), the
+                                // same window a -r prefix binding gets, so
+                                // `bind -r H resize-pane -L` repeats without the
+                                // prefix whichever way the table was entered.
+                                if is_user_repeat && repeat_time_ms > 0 && key_table_latch.is_none() {
+                                    cmd_batch.push(format!("switch-client -T {}\n", crate::util::quote_arg_if_needed(&table)));
+                                    key_table_sync.note_own_write(Some(&table));
+                                    key_table_latch = key_table_sync.latch_for(Some(table));
+                                    latch_repeat_until = Some(Instant::now() + Duration::from_millis(repeat_time_ms));
+                                }
                             } else if is_repeatable_default || is_user_repeat {
                                 prefix_armed_at = Instant::now();
                                 prefix_repeating = true;
@@ -8355,6 +8393,15 @@ pub fn run_remote(terminal: &mut Terminal<crate::platform::PsmuxBackend>, input:
             #[cfg(windows)]
             if ime_was_open { crate::platform::ime_restore(); ime_was_open = false; }
             cmd_batch.push("prefix-end\n".into());
+        }
+        // The same for a repeating latched table: back to the default table.
+        if latch_repeat_until.is_some_and(|until| Instant::now() >= until) {
+            latch_repeat_until = None;
+            if key_table_latch.take().is_some() {
+                cmd_batch.push(format!("switch-client -T {}\n",
+                    crate::util::quote_arg_if_needed(key_table_sync.default_table())));
+                key_table_sync.note_own_write(None);
+            }
         }
 
         // tmux's click timer ran out after a second status line press:
