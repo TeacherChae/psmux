@@ -8009,14 +8009,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                 }
                 CtrlReq::DisplayMenu(menu_def, x, y) => {
-                    let menu = parse_menu_definition(&menu_def, x, y);
+                    let mut menu = parse_menu_definition(&menu_def, x, y);
                     if !menu.items.is_empty() {
+                        crate::commands::expand_menu_formats(&mut menu, &app);
                         app.mode = Mode::MenuMode { menu };
                         state_dirty = true;
                     }
                 }
-                CtrlReq::DisplayMenuDirect(menu) => {
+                CtrlReq::DisplayMenuDirect(mut menu) => {
                     if !menu.items.is_empty() {
+                        crate::commands::expand_menu_formats(&mut menu, &app);
                         app.mode = Mode::MenuMode { menu };
                         state_dirty = true;
                     }

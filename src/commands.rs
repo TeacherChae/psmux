@@ -1555,6 +1555,18 @@ pub fn parse_menu_definition(def: &str, x: Option<i16>, y: Option<i16>) -> Menu 
     menu
 }
 
+/// Expand the formats in a menu's title, item names and item commands when
+/// it opens, as tmux's menu_add_item does (menu.c): `#{@option}` in a label
+/// shows its value, and a command runs with the values of the moment the
+/// menu was shown. Untimed: a command's `50%` is not strftime.
+pub fn expand_menu_formats(menu: &mut Menu, app: &AppState) {
+    menu.title = crate::format::expand_format_untimed(&menu.title, app);
+    for item in menu.items.iter_mut().filter(|i| !i.is_separator) {
+        item.name = crate::format::expand_format_untimed(&item.name, app);
+        item.command = crate::format::expand_format_untimed(&item.command, app);
+    }
+}
+
 /// Ensure a run-shell command uses -b (background) so it does not
 /// set "running: ..." status messages or create output popups.
 pub fn ensure_background(cmd: &str) -> String {
@@ -2789,8 +2801,9 @@ fn execute_unaliased_command(app: &mut AppState, cmd: &str) -> io::Result<()> {
         "display-menu" | "menu" => {
             // parse_menu_definition reads quoted items, so they are quoted again.
             let rest = requote(&parts[1..]);
-            let menu = parse_menu_definition(&rest, None, None);
+            let mut menu = parse_menu_definition(&rest, None, None);
             if !menu.items.is_empty() {
+                expand_menu_formats(&mut menu, app);
                 app.mode = Mode::MenuMode { menu };
             }
         }
@@ -4400,6 +4413,10 @@ mod tests_issue426_split_pane_alias;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue470_menu_popup.rs"]
 mod tests_issue470_menu_popup;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_menu_format_expansion.rs"]
+mod tests_menu_format_expansion;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_killwindow_bad_target.rs"]
