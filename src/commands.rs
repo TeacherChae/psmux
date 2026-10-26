@@ -1501,23 +1501,24 @@ pub fn parse_menu_definition(def: &str, x: Option<i16>, y: Option<i16>) -> Menu 
         y,
     };
     
-    let parts: Vec<&str> = def.split_whitespace().collect();
+    // Quotes group words, so a name, title or command can hold spaces.
+    let parts = parse_command_line(def);
     if parts.is_empty() {
         return menu;
     }
-    
+
     let mut i = 0;
     while i < parts.len() {
         if parts[i] == "-T" {
             if let Some(title) = parts.get(i + 1) {
-                menu.title = title.trim_matches('"').to_string();
+                menu.title = title.clone();
                 i += 2;
                 continue;
             }
         }
-        
+
         if let Some(name) = parts.get(i) {
-            let name = name.trim_matches('"').to_string();
+            let name = name.clone();
             if name.is_empty() || name == "-" {
                 menu.items.push(MenuItem {
                     name: String::new(),
@@ -1527,8 +1528,8 @@ pub fn parse_menu_definition(def: &str, x: Option<i16>, y: Option<i16>) -> Menu 
                 });
                 i += 1;
             } else {
-                let key = parts.get(i + 1).map(|k| k.trim_matches('"').chars().next()).flatten();
-                let command = parts.get(i + 2).map(|c| c.trim_matches('"').to_string()).unwrap_or_default();
+                let key = parts.get(i + 1).and_then(|k| k.chars().next());
+                let command = parts.get(i + 2).cloned().unwrap_or_default();
                 menu.items.push(MenuItem {
                     name,
                     key,

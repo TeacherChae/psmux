@@ -41,8 +41,26 @@ fn menu_names_and_commands_show_option_values() {
 #[test]
 fn display_menu_command_opens_an_expanded_menu() {
     let mut app = app_with_options();
-    // One word per field: this path still splits menu items at whitespace.
     execute_command_string(&mut app, "display-menu -T Layouts R#{@right_pct}% r split-window").unwrap();
     let Mode::MenuMode { menu } = &app.mode else { panic!("menu did not open") };
     assert_eq!(menu.items[0].name, "R25%");
+}
+
+#[test]
+fn quoted_menu_fields_keep_their_spaces() {
+    let mut app = app_with_options();
+    execute_command_string(
+        &mut app,
+        r##"display-menu -T "New window" "1: Split (R #{@right_pct}%)" 1 "new-window; split-window -h" "" "2: Plain" 2 new-window"##,
+    )
+    .unwrap();
+    let Mode::MenuMode { menu } = &app.mode else { panic!("menu did not open") };
+    assert_eq!(menu.title, "New window");
+    assert_eq!(menu.items.len(), 3);
+    assert_eq!(menu.items[0].name, "1: Split (R 25%)");
+    assert_eq!(menu.items[0].key, Some('1'));
+    assert_eq!(menu.items[0].command, "new-window; split-window -h");
+    assert!(menu.items[1].is_separator);
+    assert_eq!(menu.items[2].name, "2: Plain");
+    assert_eq!(menu.items[2].command, "new-window");
 }
